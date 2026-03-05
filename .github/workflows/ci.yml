@@ -1,0 +1,185 @@
+name: CI — IndoBERT Emotion Classification
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'MLProject/**'
+      - 'twitter_emotion_preprocessing/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+    inputs:
+      ci_sample_size:
+        description: 'Jumlah sample untuk CI training (default 500)'
+        required: false
+        default: '500'
+      num_epochs:
+        description: 'Jumlah epoch training'
+        required: false
+        default: '3'
+
+env:
+  PYTHON_VERSION: '3.12.7'
+  MLFLOW_VERSION: '2.19.0'
+  DOCKER_IMAGE_NAME: indonesian-emotion-classifier
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── 1. Setup job ────────────────────────────────────────────────────────
+      - name: Set up job
+        run: |
+          echo "================================================"
+          echo "CI — Indonesian Emotion Classification (IndoBERT)"
+          echo "================================================"
+          echo "Trigger     : ${{ github.event_name }}"
+          echo "Branch      : ${{ github.ref_name }}"
+          echo "Commit      : ${{ github.sha }}"
+          echo "Timestamp   : $(date +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "================================================"
+
+      # ── 2. Checkout ─────────────────────────────────────────────────────────
+      - name: Run actions/checkout@v3
+        uses: actions/checkout@v3
+
+      # ── 3. Setup Python ──────────────────────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      # ── 4. Check Env ─────────────────────────────────────────────────────────
+      - name: Check Env
+        run: |
+          python --version
+          pip --version
+          echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null || echo 'torch not installed yet')"
+          df -h
+          free -h
+
+      # ── 5. Install dependencies ───────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            torch==2.0.1 \
+            transformers==4.41.2 \
+            accelerate==0.30.1 \
+            scikit-learn>=1.3.0 \
+            numpy>=1.24.0 \
+            pandas>=2.0.0 \
+            mlflow==${{ env.MLFLOW_VERSION }} \
+            dagshub>=0.3.0 \
+            matplotlib>=3.7.0
+
+      # ── 6. Set MLflow Tracking URI ────────────────────────────────────────────
+      - name: Set MLflow Tracking URI
+        run: |
+          # Gunakan DagsHub sebagai remote MLflow tracking
+          echo "MLFLOW_TRACKING_URI=https://dagshub.com/${{ secrets.DAGSHUB_USERNAME }}/${{ secrets.DAGSHUB_REPO_NAME }}.mlflow" >> $GITHUB_ENV
+          echo "MLFLOW_TRACKING_USERNAME=${{ secrets.DAGSHUB_USERNAME }}" >> $GITHUB_ENV
+          echo "MLFLOW_TRACKING_PASSWORD=${{ secrets.DAGSHUB_TOKEN }}" >> $GITHUB_ENV
+          echo "MLflow URI set to DagsHub"
+
+      # ── 7. Run MLflow project ─────────────────────────────────────────────────
+      - name: Run mlflow project
+        env:
+          CI_SAMPLE_SIZE: ${{ github.event.inputs.ci_sample_size || '500' }}
+          NUM_EPOCHS:     ${{ github.event.inputs.num_epochs || '3' }}
+        run: |
+          cd MLProject
+          mlflow run . \
+            --env-manager=local \
+            -P ci_mode=true \
+            -P ci_sample_size=$CI_SAMPLE_SIZE \
+            -P num_epochs=$NUM_EPOCHS \
+            -P preprocessing_dir=../twitter_emotion_preprocessing
+
+      # ── 8. Get latest MLflow run_id ───────────────────────────────────────────
+      - name: Get latest MLflow run_id
+        run: |
+          RUN_ID=$(python -c "
+          import mlflow, os
+          client = mlflow.tracking.MlflowClient()
+          exp = client.get_experiment_by_name('Indonesian Emotion Classification - IndoBERT')
+          if exp:
+              runs = client.search_runs(exp.experiment_id, order_by=['start_time DESC'], max_results=1)
+              if runs:
+                  print(runs[0].info.run_id)
+                  exit()
+          print('NOT_FOUND')
+          ")
+          echo "LATEST_RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          echo "Latest MLflow Run ID: $RUN_ID"
+
+      # ── 9. Install Python dependencies untuk upload ───────────────────────────
+      - name: Install Python dependencies
+        run: pip install requests
+
+      # ── 10. Upload artifacts ke GitHub ────────────────────────────────────────
+      - name: Upload to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-artifacts-${{ github.run_number }}
+          path: |
+            MLProject/results_ci/
+            MLProject/latest_run_id.txt
+          retention-days: 30
+
+      # ── 11. Build Docker Model ────────────────────────────────────────────────
+      - name: Build Docker Model
+        if: env.LATEST_RUN_ID != 'NOT_FOUND'
+        run: |
+          echo "Building Docker image dari MLflow model..."
+          mlflow models build-docker \
+            --model-uri "runs:/${{ env.LATEST_RUN_ID }}/model" \
+            --name "${{ env.DOCKER_IMAGE_NAME }}" \
+            --enable-mlserver
+
+      # ── 12. Log in to Docker Hub ──────────────────────────────────────────────
+      - name: Log in to Docker Hub
+        if: env.LATEST_RUN_ID != 'NOT_FOUND'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ── 13. Tag Docker Image ───────────────────────────────────────────────────
+      - name: Tag Docker Image
+        if: env.LATEST_RUN_ID != 'NOT_FOUND'
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          docker tag ${{ env.DOCKER_IMAGE_NAME }}:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+          docker tag ${{ env.DOCKER_IMAGE_NAME }}:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:$SHORT_SHA
+          echo "DOCKER_TAG=$SHORT_SHA" >> $GITHUB_ENV
+          echo "Image tagged: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:$SHORT_SHA"
+
+      # ── 14. Push Docker Image ──────────────────────────────────────────────────
+      - name: Push Docker Image
+        if: env.LATEST_RUN_ID != 'NOT_FOUND'
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_TAG }}
+          echo "✅ Image pushed ke Docker Hub:"
+          echo "   ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest"
+          echo "   ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ env.DOCKER_TAG }}"
+
+      # ── 15. Complete job ───────────────────────────────────────────────────────
+      - name: Complete job
+        if: always()
+        run: |
+          echo "================================================"
+          echo "CI PIPELINE SUMMARY"
+          echo "================================================"
+          echo "Status      : ${{ job.status }}"
+          echo "Run Number  : ${{ github.run_number }}"
+          echo "MLflow Run  : ${{ env.LATEST_RUN_ID }}"
+          echo "Docker Tag  : ${{ env.DOCKER_TAG }}"
+          echo "Timestamp   : $(date +'%Y-%m-%d %H:%M:%S UTC')"
+          echo "================================================"
