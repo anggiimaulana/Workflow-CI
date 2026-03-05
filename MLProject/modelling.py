@@ -89,10 +89,10 @@ def main():
     log.info("CI Mode: %s | Epochs: %d", CI_MODE, NUM_EPOCHS)
     log.info("=" * 60)
 
-    # Setup MLflow lokal
+    # ── Setup MLflow lokal ────────────────────────────────────────────────────
     mlflow.set_experiment(EXPERIMENT_NAME)
 
-    # Load dataset
+    # ── Load dataset ──────────────────────────────────────────────────────────
     train_path = os.path.join(PREPROCESSING_DIR, "train.csv")
     val_path   = os.path.join(PREPROCESSING_DIR, "val.csv")
 
@@ -125,7 +125,7 @@ def main():
     num_labels = metadata["num_labels"]
     log.info("Train: %d | Val: %d | Labels: %d", len(df_train), len(df_val), num_labels)
 
-    # Model & tokenizer
+    # ── Model & tokenizer ─────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME, num_labels=num_labels,
@@ -171,17 +171,17 @@ def main():
         log.info("MLflow Run ID: %s", run.info.run_id)
 
         # Log params — semua string/int agar tidak error
+        # Catatan: ci_mode, num_epochs, ci_sample_size sudah di-log otomatis
+        # oleh MLflow dari parameter MLProject — jangan log ulang!
         mlflow.log_param("model_name",    str(MODEL_NAME))
         mlflow.log_param("max_length",    int(MAX_LENGTH))
         mlflow.log_param("batch_size",    int(BATCH_SIZE))
-        mlflow.log_param("num_epochs",    int(NUM_EPOCHS))
         mlflow.log_param("learning_rate", "2e-5")
         mlflow.log_param("weight_decay",  "0.05")
         mlflow.log_param("warmup_ratio",  "0.1")
         mlflow.log_param("train_samples", int(len(train_dataset)))
         mlflow.log_param("val_samples",   int(len(val_dataset)))
         mlflow.log_param("num_labels",    int(num_labels))
-        mlflow.log_param("ci_mode",       str(CI_MODE))
         mlflow.log_param("device",        str(device))
 
         trainer = Trainer(
