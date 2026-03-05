@@ -234,13 +234,44 @@ def main():
             json.dump(report, f, indent=2)
         mlflow.log_artifact(report_path, artifact_path="reports")
 
-        # Simpan model config (bukan bobot besar)
+        # Simpan model config
         model_config_path = os.path.join(OUTPUT_DIR, "model_config")
         os.makedirs(model_config_path, exist_ok=True)
         trainer.model.config.to_json_file(
             os.path.join(model_config_path, "config.json"))
         tokenizer.save_pretrained(model_config_path)
         mlflow.log_artifacts(model_config_path, artifact_path="model_config")
+
+        # Log model sebagai MLflow pyfunc agar bisa di-build Docker
+        class EmotionModelWrapper(mlflow.pyfunc.PythonModel):
+            def load_context(self, context):
+                import torch
+                from transformers import AutoModelForSequenceClassification, AutoTokenizer
+                self.tokenizer = AutoTokenizer.from_pretrained(context.artifacts["model_config"])
+                self.model = AutoModelForSequenceClassification.from_pretrained(
+                    context.artifacts["model_config"])
+                self.model.eval()
+
+            def predict(self, context, model_input):
+                import torch
+                texts = model_input["text"].tolist() if hasattr(model_input, "tolist") else list(model_input["text"])
+                inputs = self.tokenizer(texts, return_tensors="pt",
+                    padding=True, truncation=True, max_length=128)
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                preds = outputs.logits.argmax(-1).numpy()
+                return preds
+
+        mlflow.pyfunc.log_model(
+            artifact_path="model",
+            python_model=EmotionModelWrapper(),
+            artifacts={"model_config": model_config_path},
+            pip_requirements=[
+                "torch>=2.2.0",
+                "transformers==4.41.2",
+                "accelerate>=1.1.0",
+            ],
+        )
 
         # Simpan run_id
         with open("latest_run_id.txt", "w") as f:

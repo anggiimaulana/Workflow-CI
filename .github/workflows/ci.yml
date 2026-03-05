@@ -114,9 +114,11 @@ jobs:
         run: |
           echo "Building Docker image dengan mlflow models build-docker..."
           mlflow models build-docker \
-            --model-uri "MLProject/results_ci/model_config" \
-            --name "indobert-emotion"
-        continue-on-error: true
+            --model-uri "runs:/${{ env.LATEST_RUN_ID }}/model" \
+            --name "indobert-emotion" \
+            --env-manager local
+        env:
+          MLFLOW_TRACKING_URI: "file://${{ github.workspace }}/MLProject/mlruns"
 
       # ── 11. Log in to Docker Hub ──────────────────────────────────────────────
       - name: Log in to Docker Hub
