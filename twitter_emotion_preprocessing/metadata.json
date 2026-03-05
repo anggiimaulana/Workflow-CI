@@ -1,0 +1,17 @@
+{
+  "num_labels": 8,
+  "label_mapping": {
+    "anger": 0,
+    "disgust": 1,
+    "fear": 2,
+    "happy": 3,
+    "joy": 4,
+    "love": 5,
+    "sadness": 6,
+    "surprise": 7
+  },
+  "total_samples": 6603,
+  "train_samples": 5282,
+  "val_samples": 1321,
+  "max_length": 128
+}
