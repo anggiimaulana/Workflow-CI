@@ -1,4 +1,4 @@
-name: CI - IndoBERT Emotion Classification
+name: CI — IndoBERT Emotion Classification
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # 1. Set up job
+      # ── 1. Set up job ────────────────────────────────────────────────────────
       - name: Set up job
         run: |
           echo "================================================"
@@ -31,17 +31,17 @@ jobs:
           echo "Timestamp : $(date +'%Y-%m-%d %H:%M:%S UTC')"
           echo "================================================"
 
-      # 2. Checkout
+      # ── 2. Checkout ──────────────────────────────────────────────────────────
       - name: Run actions/checkout@v3
         uses: actions/checkout@v3
 
-      # 3. Setup Python
+      # ── 3. Setup Python ──────────────────────────────────────────────────────
       - name: Set up Python 3.12.7
         uses: actions/setup-python@v4
         with:
           python-version: "3.12.7"
 
-      # 4. Check Env
+      # ── 4. Check Env ─────────────────────────────────────────────────────────
       - name: Check Env
         run: |
           python --version
@@ -49,7 +49,7 @@ jobs:
           echo "Working dir: $(pwd)"
           ls -la MLProject/
 
-      # 5. Install dependencies
+      # ── 5. Install dependencies ──────────────────────────────────────────────
       - name: Install dependencies
         run: |
           pip install --upgrade pip
@@ -63,7 +63,7 @@ jobs:
             pandas \
             matplotlib
 
-      # 6. Run mlflow project
+      # ── 6. Run mlflow project ─────────────────────────────────────────────────
       - name: Run mlflow project
         run: |
           cd MLProject
@@ -77,25 +77,30 @@ jobs:
         env:
           MLFLOW_TRACKING_URI: "file:./mlruns"
 
-      # 7. Get latest MLflow run_id
+      # ── 7. Get latest MLflow run_id ───────────────────────────────────────────
       - name: Get latest MLflow run_id
         run: |
           RUN_ID=$(cat MLProject/latest_run_id.txt 2>/dev/null || echo "NOT_FOUND")
           echo "LATEST_RUN_ID=$RUN_ID" >> $GITHUB_ENV
           echo "Latest MLflow Run ID: $RUN_ID"
 
-      # 8. Install Python dependencies
+      # ── 8. Install Python dependencies ───────────────────────────────────────
       - name: Install Python dependencies
         run: pip install requests
 
-      # 9. Upload to GitHub
+      # ── 9. Upload to GitHub ───────────────────────────────────────────────────
       - name: Upload to GitHub
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           mkdir -p saved_artifacts
+
+          # Hanya copy file RINGAN — skip checkpoint (model.safetensors, optimizer.pt)
           cp MLProject/latest_run_id.txt saved_artifacts/ 2>/dev/null || true
-          cp -r MLProject/results_ci saved_artifacts/ 2>/dev/null || true
+          cp MLProject/results_ci/confusion_matrix.png saved_artifacts/ 2>/dev/null || true
+          cp MLProject/results_ci/classification_report.json saved_artifacts/ 2>/dev/null || true
+          cp -r MLProject/results_ci/model_config saved_artifacts/ 2>/dev/null || true
+
           git add saved_artifacts/
           git diff --staged --quiet && echo "No changes." || (
             git commit -m "ci: save artifacts [run=${{ env.LATEST_RUN_ID }}] [$(date +'%Y-%m-%d %H:%M')]"
@@ -104,7 +109,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 10. Build Docker Model
+      # ── 10. Build Docker Model ────────────────────────────────────────────────
       - name: Build Docker Model
         run: |
           echo "Building Docker image dengan mlflow models build-docker..."
@@ -113,14 +118,14 @@ jobs:
             --name "indobert-emotion"
         continue-on-error: true
 
-      # 11. Log in to Docker Hub
+      # ── 11. Log in to Docker Hub ──────────────────────────────────────────────
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 12. Tag Docker Image
+      # ── 12. Tag Docker Image ──────────────────────────────────────────────────
       - name: Tag Docker Image
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
@@ -130,14 +135,14 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:$SHORT_SHA || true
           echo "DOCKER_TAG=$SHORT_SHA" >> $GITHUB_ENV
 
-      # 13. Push Docker Image
+      # ── 13. Push Docker Image ─────────────────────────────────────────────────
       - name: Push Docker Image
         run: |
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:latest || true
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:${{ env.DOCKER_TAG }} || true
           echo "✅ Docker image pushed!"
 
-      # Complete job ──
+      # ── Complete job ──────────────────────────────────────────────────────────
       - name: Complete job
         if: always()
         run: |
