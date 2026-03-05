@@ -205,7 +205,7 @@ def main():
             "train_samples" : len(train_dataset),
             "val_samples"   : len(val_dataset),
             "num_labels"    : num_labels,
-            "ci_mode"       : CI_MODE,
+            "ci_mode"       : str(CI_MODE),
             "device"        : str(device),
         })
 
