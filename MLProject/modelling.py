@@ -44,7 +44,6 @@ LEARNING_RATE       = float(os.getenv("LEARNING_RATE",  "2e-5"))
 WEIGHT_DECAY        = float(os.getenv("WEIGHT_DECAY",   "0.05"))
 WARMUP_RATIO        = float(os.getenv("WARMUP_RATIO",   "0.1"))
 RANDOM_SEED         = int(os.getenv("RANDOM_SEED",      "42"))
-# CI_MODE: jika True, pakai sample kecil agar cepat di GitHub Actions
 CI_MODE             = os.getenv("CI_MODE", "false").lower() == "true"
 CI_SAMPLE_SIZE      = int(os.getenv("CI_SAMPLE_SIZE",  "500"))
 OUTPUT_DIR          = os.getenv("OUTPUT_DIR",           "./results_ci")
@@ -115,7 +114,6 @@ def main():
     df_train = pd.read_csv(train_path)
     df_val   = pd.read_csv(val_path)
 
-    # Jika CI mode, ambil sample kecil per kelas agar training cepat
     if CI_MODE:
         log.info("CI Mode aktif — menggunakan sample %d data", CI_SAMPLE_SIZE)
         n_per_class = max(1, CI_SAMPLE_SIZE // df_train["label"].nunique())
@@ -139,10 +137,7 @@ def main():
     log.info("Train: %d | Val: %d | Labels: %d", len(df_train), len(df_val), num_labels)
 
     # 2. Load tokenizer & model
-    log.info("Memuat tokenizer: %s", MODEL_NAME)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    log.info("Memuat model IndoBERT...")
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME,
         num_labels=num_labels,
@@ -193,18 +188,18 @@ def main():
     with mlflow.start_run() as run:
         log.info("MLflow Run ID: %s", run.info.run_id)
 
-        # Log parameters
+        # ci_mode dikonversi ke string agar tidak error di DagsHub
         mlflow.log_params({
-            "model_name"    : MODEL_NAME,
-            "max_length"    : MAX_LENGTH,
-            "batch_size"    : BATCH_SIZE,
-            "num_epochs"    : NUM_EPOCHS,
-            "learning_rate" : LEARNING_RATE,
-            "weight_decay"  : WEIGHT_DECAY,
-            "warmup_ratio"  : WARMUP_RATIO,
-            "train_samples" : len(train_dataset),
-            "val_samples"   : len(val_dataset),
-            "num_labels"    : num_labels,
+            "model_name"    : str(MODEL_NAME),
+            "max_length"    : int(MAX_LENGTH),
+            "batch_size"    : int(BATCH_SIZE),
+            "num_epochs"    : int(NUM_EPOCHS),
+            "learning_rate" : str(LEARNING_RATE),   # float scientific → string
+            "weight_decay"  : str(WEIGHT_DECAY),
+            "warmup_ratio"  : str(WARMUP_RATIO),
+            "train_samples" : int(len(train_dataset)),
+            "val_samples"   : int(len(val_dataset)),
+            "num_labels"    : int(num_labels),
             "ci_mode"       : str(CI_MODE),
             "device"        : str(device),
         })
@@ -227,7 +222,6 @@ def main():
 
         # 7. Evaluasi & log metrics
         eval_results = trainer.evaluate()
-
         mlflow.log_metrics({
             "eval_accuracy"   : eval_results.get("eval_accuracy", 0),
             "eval_f1_macro"   : eval_results.get("eval_f1_macro", 0),
@@ -271,14 +265,17 @@ def main():
             json.dump(report, f, indent=2)
         mlflow.log_artifact(report_path, artifact_path="reports")
 
-        # 10. Log model
-        mlflow.pytorch.log_model(model, artifact_path="model")
+        # 10. Log model — skip bobot besar, simpan config & tokenizer saja
+        model_config_path = os.path.join(OUTPUT_DIR, "model_config")
+        os.makedirs(model_config_path, exist_ok=True)
+        trainer.model.config.to_json_file(os.path.join(model_config_path, "config.json"))
+        tokenizer.save_pretrained(model_config_path)
+        mlflow.log_artifacts(model_config_path, artifact_path="model_config")
 
         # 11. Simpan run_id untuk diambil di workflow
         run_id_path = "latest_run_id.txt"
         with open(run_id_path, "w") as f:
             f.write(run.info.run_id)
-        mlflow.log_artifact(run_id_path)
 
         log.info("=" * 60)
         log.info("✅ TRAINING SELESAI")
