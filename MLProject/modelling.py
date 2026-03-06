@@ -4,21 +4,28 @@ import os
 import pickle
 import sys
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import mlflow
-import mlflow.pytorch
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
-import torch
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import (
-    accuracy_score, classification_report,
-    confusion_matrix, f1_score, precision_score, recall_score,
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
 )
-from torch.utils.data import Dataset
-from transformers import (
-    AutoModelForSequenceClassification, AutoTokenizer,
-    EarlyStoppingCallback, Trainer, TrainingArguments,
-)
+from sklearn.pipeline import Pipeline
+from mlflow.models import infer_signature
 
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -26,261 +33,149 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-PREPROCESSING_DIR = os.getenv("PREPROCESSING_DIR", "twitter_emotion_preprocessing")
-MODEL_NAME        = os.getenv("MODEL_NAME",         "indobenchmark/indobert-base-p1")
-MAX_LENGTH        = int(os.getenv("MAX_LENGTH",     "128"))
-BATCH_SIZE        = int(os.getenv("BATCH_SIZE",     "16"))
-NUM_EPOCHS        = int(os.getenv("NUM_EPOCHS",     "1"))
-LEARNING_RATE     = float(os.getenv("LEARNING_RATE","2e-5"))
-WEIGHT_DECAY      = float(os.getenv("WEIGHT_DECAY", "0.05"))
-WARMUP_RATIO      = float(os.getenv("WARMUP_RATIO", "0.1"))
-RANDOM_SEED       = int(os.getenv("RANDOM_SEED",    "42"))
-CI_MODE           = os.getenv("CI_MODE", "false").lower() == "true"
-CI_SAMPLE_SIZE    = int(os.getenv("CI_SAMPLE_SIZE", "300"))
-OUTPUT_DIR        = os.getenv("OUTPUT_DIR",         "./results_ci")
-EXPERIMENT_NAME   = "Indonesian-Emotion-CI"
+# Konfigurasi
+PREPROCESSING_DIR   = "twitter_emotion_preprocessing"
+RANDOM_SEED         = 42
+ARTIFACTS_DIR       = "./artifacts_modelling"
+# MLFLOW_TRACKING_URI = "http://127.0.0.1:5000/"
+EXPERIMENT_NAME     = "Indonesian-Emotion-Classification"
 
-torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 
 
-class EmotionDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_length=128):
-        self.texts     = texts
-        self.labels    = labels
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.texts)
-
-    def __getitem__(self, idx):
-        enc = self.tokenizer(
-            str(self.texts[idx]),
-            add_special_tokens=True,
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-            return_attention_mask=True,
-            return_tensors="pt",
-        )
-        return {
-            "input_ids":      enc["input_ids"].flatten(),
-            "attention_mask": enc["attention_mask"].flatten(),
-            "labels":         torch.tensor(self.labels[idx], dtype=torch.long),
-        }
-
-
-def compute_metrics(pred):
-    labels = pred.label_ids
-    preds  = pred.predictions.argmax(-1)
-    return {
-        "accuracy"   : accuracy_score(labels, preds),
-        "f1_macro"   : f1_score(labels, preds, average="macro"),
-        "f1_weighted": f1_score(labels, preds, average="weighted"),
-        "precision"  : precision_score(labels, preds, average="weighted", zero_division=0),
-        "recall"     : recall_score(labels, preds, average="weighted", zero_division=0),
-    }
-
-
 def main():
-    log.info("=" * 60)
-    log.info("MLflow Project — IndoBERT CI Training")
-    log.info("CI Mode: %s | Epochs: %d", CI_MODE, NUM_EPOCHS)
-    log.info("=" * 60)
-
-    # ── Setup MLflow lokal ────────────────────────────────────────────────────
+    # mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(EXPERIMENT_NAME)
+    # log.info("MLflow URI : %s", MLFLOW_TRACKING_URI)
+    log.info("Experiment : %s", EXPERIMENT_NAME)
 
-    # ── Load dataset ──────────────────────────────────────────────────────────
-    train_path = os.path.join(PREPROCESSING_DIR, "train.csv")
-    val_path   = os.path.join(PREPROCESSING_DIR, "val.csv")
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-    if not os.path.exists(train_path):
-        log.error("Dataset tidak ditemukan: %s", train_path)
-        sys.exit(1)
+    # Load dataset
+    log.info("Memuat dataset dari: %s", PREPROCESSING_DIR)
+    df_train = pd.read_csv(os.path.join(PREPROCESSING_DIR, "train.csv"))
+    df_val   = pd.read_csv(os.path.join(PREPROCESSING_DIR, "val.csv"))
 
-    df_train = pd.read_csv(train_path)
-    df_val   = pd.read_csv(val_path)
-
-    if CI_MODE:
-        log.info("CI Mode — sample %d data", CI_SAMPLE_SIZE)
-        n = max(1, CI_SAMPLE_SIZE // df_train["label"].nunique())
-        df_train = (
-            df_train.groupby("label", group_keys=False)
-            .apply(lambda x: x.sample(min(len(x), n), random_state=RANDOM_SEED),
-                   include_groups=False)
-            .reset_index(drop=True)
-        )
-        df_val = df_val.sample(
-            min(len(df_val), CI_SAMPLE_SIZE // 4), random_state=RANDOM_SEED
-        ).reset_index(drop=True)
-        log.info("Setelah sampling — train: %d, val: %d", len(df_train), len(df_val))
-
-    with open(os.path.join(PREPROCESSING_DIR, "metadata.json")) as f:
-        metadata = json.load(f)
     with open(os.path.join(PREPROCESSING_DIR, "label_encoder.pkl"), "rb") as f:
         le = pickle.load(f)
 
-    num_labels = metadata["num_labels"]
-    log.info("Train: %d | Val: %d | Labels: %d", len(df_train), len(df_val), num_labels)
+    class_names = list(le.classes_)
+    log.info("Train: %d | Val: %d | Labels: %s", len(df_train), len(df_val), class_names)
 
-    # ── Model & tokenizer ─────────────────────────────────────────────────────
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, num_labels=num_labels,
-        problem_type="single_label_classification",
-    )
-    model.config.hidden_dropout_prob          = 0.3
-    model.config.attention_probs_dropout_prob = 0.3
+    X_train = df_train["clean_tweet"].astype(str).tolist()
+    y_train = df_train["label_id"].tolist()
+    X_val   = df_val["clean_tweet"].astype(str).tolist()
+    y_val   = df_val["label_id"].tolist()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    log.info("Device: %s", device)
+    # Pipeline: TF-IDF + Random Forest
+    pipeline = Pipeline([
+        ("tfidf", TfidfVectorizer(
+            max_features=10000,
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+        )),
+        ("clf", RandomForestClassifier(
+            n_estimators=100,
+            random_state=RANDOM_SEED,
+            n_jobs=-1,
+        )),
+    ])
 
-    train_dataset = EmotionDataset(
-        df_train["clean_tweet"].tolist(), df_train["label_id"].tolist(),
-        tokenizer, MAX_LENGTH,
-    )
-    val_dataset = EmotionDataset(
-        df_val["clean_tweet"].tolist(), df_val["label_id"].tolist(),
-        tokenizer, MAX_LENGTH,
-    )
+    # AUTOLOG
+    mlflow.sklearn.autolog(log_models=False)
 
-    training_args = TrainingArguments(
-        output_dir                  = OUTPUT_DIR,
-        num_train_epochs            = NUM_EPOCHS,
-        per_device_train_batch_size = BATCH_SIZE,
-        per_device_eval_batch_size  = BATCH_SIZE,
-        warmup_ratio                = WARMUP_RATIO,
-        weight_decay                = WEIGHT_DECAY,
-        learning_rate               = LEARNING_RATE,
-        logging_steps               = 10,
-        eval_strategy               = "epoch",
-        save_strategy               = "epoch",
-        load_best_model_at_end      = True,
-        metric_for_best_model       = "f1_weighted",
-        greater_is_better           = True,
-        save_total_limit            = 1,
-        report_to                   = "none",
-        fp16                        = torch.cuda.is_available(),
-        seed                        = RANDOM_SEED,
-    )
-
-    with mlflow.start_run() as run:
+    with mlflow.start_run(run_name="rf-tfidf-autolog") as run:
         log.info("MLflow Run ID: %s", run.info.run_id)
 
-        # Log params — semua string/int agar tidak error
-        # Catatan: ci_mode, num_epochs, ci_sample_size sudah di-log otomatis
-        # oleh MLflow dari parameter MLProject — jangan log ulang!
-        mlflow.log_param("model_name",    str(MODEL_NAME))
-        mlflow.log_param("max_length",    int(MAX_LENGTH))
-        mlflow.log_param("batch_size",    int(BATCH_SIZE))
-        mlflow.log_param("learning_rate", "2e-5")
-        mlflow.log_param("weight_decay",  "0.05")
-        mlflow.log_param("warmup_ratio",  "0.1")
-        mlflow.log_param("train_samples", int(len(train_dataset)))
-        mlflow.log_param("val_samples",   int(len(val_dataset)))
-        mlflow.log_param("num_labels",    int(num_labels))
-        mlflow.log_param("device",        str(device))
+        # Log params tambahan
+        mlflow.log_params({
+            "model_type"    : "RandomForest",
+            "n_estimators"  : 100,
+            "max_features"  : 3000,
+            "ngram_range"   : "(1,2)",
+            "random_seed"   : RANDOM_SEED,
+            "train_samples" : len(X_train),
+            "val_samples"   : len(X_val),
+            "num_labels"    : len(class_names),
+        })
 
-        trainer = Trainer(
-            model=model, args=training_args,
-            train_dataset=train_dataset, eval_dataset=val_dataset,
-            compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(
-                early_stopping_patience=2, early_stopping_threshold=0.001,
-            )],
+        log.info("Training model...")
+        pipeline.fit(X_train, y_train)
+
+        # Prediksi sample untuk infer signature
+        sample_input = pd.DataFrame({"text": X_train[:5]})
+        sample_output = pipeline.predict(sample_input["text"].tolist())
+
+        signature = infer_signature(sample_input, sample_output)
+
+        input_example = pd.DataFrame({
+            "text": ["Saya sangat senang hari ini"]
+        })
+
+        mlflow.sklearn.log_model(
+            sk_model=pipeline,
+            artifact_path="model",
+            signature=signature,
+            input_example=input_example,
+            # registered_model_name="emotion-rf-model",
         )
 
-        log.info("Mulai training...")
-        trainer.train()
+        mlflow.log_artifact(
+            os.path.join(PREPROCESSING_DIR, "label_encoder.pkl"),
+            artifact_path="preprocessing"
+        )
 
-        eval_results = trainer.evaluate()
-        mlflow.log_metric("eval_accuracy",    eval_results.get("eval_accuracy", 0))
-        mlflow.log_metric("eval_f1_macro",    eval_results.get("eval_f1_macro", 0))
-        mlflow.log_metric("eval_f1_weighted", eval_results.get("eval_f1_weighted", 0))
-        mlflow.log_metric("eval_precision",   eval_results.get("eval_precision", 0))
-        mlflow.log_metric("eval_recall",      eval_results.get("eval_recall", 0))
-        mlflow.log_metric("eval_loss",        eval_results.get("eval_loss", 0))
+        # Evaluasi
+        y_pred = pipeline.predict(X_val)
+        y_prob = pipeline.predict_proba(X_val)
 
-        # Artefak: confusion matrix
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from sklearn.metrics import ConfusionMatrixDisplay
+        acc  = accuracy_score(y_val, y_pred)
+        f1w  = f1_score(y_val, y_pred, average="weighted")
+        f1m  = f1_score(y_val, y_pred, average="macro")
+        prec = precision_score(y_val, y_pred, average="weighted", zero_division=0)
+        rec  = recall_score(y_val, y_pred, average="weighted", zero_division=0)
 
-        predictions = trainer.predict(val_dataset)
-        y_pred = predictions.predictions.argmax(-1)
-        y_true = predictions.label_ids
+        mlflow.log_metrics({
+            "accuracy"   : acc,
+            "f1_weighted": f1w,
+            "f1_macro"   : f1m,
+            "precision"  : prec,
+            "recall"     : rec,
+        })
 
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        cm_path = os.path.join(OUTPUT_DIR, "confusion_matrix.png")
+        log.info("Accuracy   : %.4f", acc)
+        log.info("F1 Weighted: %.4f", f1w)
+
+        # Artefak 1: Confusion Matrix
         fig, ax = plt.subplots(figsize=(10, 8))
         ConfusionMatrixDisplay(
-            confusion_matrix(y_true, y_pred), display_labels=le.classes_,
+            confusion_matrix(y_val, y_pred),
+            display_labels=class_names,
         ).plot(ax=ax, cmap="Blues")
-        ax.set_title("Confusion Matrix — CI", fontweight="bold")
+        ax.set_title("Confusion Matrix — Random Forest", fontweight="bold")
+        plt.xticks(rotation=45, ha="right")
         plt.tight_layout()
-        plt.savefig(cm_path, dpi=120, bbox_inches="tight")
+        cm_path = os.path.join(ARTIFACTS_DIR, "training_confusion_matrix.png")
+        plt.savefig(cm_path, dpi=150, bbox_inches="tight")
         plt.close()
-        mlflow.log_artifact(cm_path, artifact_path="plots")
+        mlflow.log_artifact(cm_path)
+        log.info("Confusion matrix logged!")
 
-        # Artefak: classification report
-        report = classification_report(y_true, y_pred,
-            target_names=le.classes_, output_dict=True)
-        report_path = os.path.join(OUTPUT_DIR, "classification_report.json")
-        with open(report_path, "w") as f:
-            json.dump(report, f, indent=2)
-        mlflow.log_artifact(report_path, artifact_path="reports")
-
-        # Simpan model config
-        model_config_path = os.path.join(OUTPUT_DIR, "model_config")
-        os.makedirs(model_config_path, exist_ok=True)
-        trainer.model.config.to_json_file(
-            os.path.join(model_config_path, "config.json"))
-        tokenizer.save_pretrained(model_config_path)
-        mlflow.log_artifacts(model_config_path, artifact_path="model_config")
-
-        # Log model sebagai MLflow pyfunc agar bisa di-build Docker
-        class EmotionModelWrapper(mlflow.pyfunc.PythonModel):
-            def load_context(self, context):
-                import torch
-                from transformers import AutoModelForSequenceClassification, AutoTokenizer
-                self.tokenizer = AutoTokenizer.from_pretrained(context.artifacts["model_config"])
-                self.model = AutoModelForSequenceClassification.from_pretrained(
-                    context.artifacts["model_config"])
-                self.model.eval()
-
-            def predict(self, context, model_input):
-                import torch
-                texts = model_input["text"].tolist() if hasattr(model_input, "tolist") else list(model_input["text"])
-                inputs = self.tokenizer(texts, return_tensors="pt",
-                    padding=True, truncation=True, max_length=128)
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
-                preds = outputs.logits.argmax(-1).numpy()
-                return preds
-
-        mlflow.pyfunc.log_model(
-            artifact_path="model",
-            python_model=EmotionModelWrapper(),
-            artifacts={"model_config": model_config_path},
-            pip_requirements=[
-                "torch>=2.2.0",
-                "transformers==4.41.2",
-                "accelerate>=1.1.0",
-            ],
+        # Artefak 2: Classification Report JSON
+        report = classification_report(
+            y_val, y_pred,
+            target_names=class_names,
+            output_dict=True,
+            digits=4,
         )
-
-        # Simpan run_id
-        with open("latest_run_id.txt", "w") as f:
-            f.write(run.info.run_id)
+        cr_path = os.path.join(ARTIFACTS_DIR, "classification_report.json")
+        with open(cr_path, "w") as f:
+            json.dump(report, f, indent=2)
+        mlflow.log_artifact(cr_path)
+        log.info("Classification report logged!")
 
         log.info("=" * 60)
-        log.info("✅ SELESAI | Run ID: %s", run.info.run_id)
-        log.info("   Accuracy    : %.4f", eval_results.get("eval_accuracy", 0))
-        log.info("   F1 Weighted : %.4f", eval_results.get("eval_f1_weighted", 0))
+        log.info("SELESAI — Run ID: %s", run.info.run_id)
         log.info("=" * 60)
 
 
