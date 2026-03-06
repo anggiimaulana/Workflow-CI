@@ -1,0 +1,15 @@
+artifact_uri: file:///home/runner/work/Workflow-CI/Workflow-CI/MLProject/mlruns/602867549293793783/8ad68fd7ce54495489ee4662c7e33c70/artifacts
+end_time: 1772836158256
+entry_point_name: ''
+experiment_id: '602867549293793783'
+lifecycle_stage: active
+run_id: 8ad68fd7ce54495489ee4662c7e33c70
+run_name: nervous-toad-59
+run_uuid: 8ad68fd7ce54495489ee4662c7e33c70
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1772836145993
+status: 3
+tags: []
+user_id: runner
