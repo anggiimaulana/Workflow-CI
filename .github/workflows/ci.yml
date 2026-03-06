@@ -1,4 +1,4 @@
-name: CI — IndoBERT Emotion Classification
+name: CI - Indonesian Emotion Classification (Random Forest)
 
 on:
   push:
@@ -7,23 +7,18 @@ on:
       - "MLProject/**"
       - ".github/workflows/ci.yml"
   workflow_dispatch:
-    inputs:
-      num_epochs:
-        description: "Jumlah epoch training"
-        required: false
-        default: "1"
 
 jobs:
   train-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
-      # ── 1. Set up job ────────────────────────────────────────────────────────
+      # 1. Set up job
       - name: Set up job
         run: |
           echo "================================================"
-          echo "CI — Indonesian Emotion Classification (IndoBERT)"
+          echo "CI — Indonesian Emotion Classification (RF)"
           echo "================================================"
           echo "Trigger   : ${{ github.event_name }}"
           echo "Branch    : ${{ github.ref_name }}"
@@ -31,17 +26,17 @@ jobs:
           echo "Timestamp : $(date +'%Y-%m-%d %H:%M:%S UTC')"
           echo "================================================"
 
-      # ── 2. Checkout ──────────────────────────────────────────────────────────
+      # 2. Checkou
       - name: Run actions/checkout@v3
         uses: actions/checkout@v3
 
-      # ── 3. Setup Python ──────────────────────────────────────────────────────
+      # 3. Setup Python─
       - name: Set up Python 3.12.7
         uses: actions/setup-python@v4
         with:
           python-version: "3.12.7"
 
-      # ── 4. Check Env ─────────────────────────────────────────────────────────
+      # 4. Check Env─
       - name: Check Env
         run: |
           python --version
@@ -49,59 +44,52 @@ jobs:
           echo "Working dir: $(pwd)"
           ls -la MLProject/
 
-      # ── 5. Install dependencies ──────────────────────────────────────────────
+      # 5. Install dependencies─
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install \
             mlflow==2.19.0 \
-            torch>=2.2.0 \
-            transformers==4.41.2 \
-            "accelerate>=1.1.0" \
-            scikit-learn \
+            scikit-learn==1.5.2 \
             numpy \
             pandas \
             matplotlib
 
-      # ── 6. Run mlflow project ─────────────────────────────────────────────────
+      # 6. Run mlflow project─
       - name: Run mlflow project
         run: |
           cd MLProject
-          NUM_EPOCHS=${{ github.event.inputs.num_epochs || '1' }}
           mlflow run . \
             --env-manager=local \
-            --experiment-name "Indonesian-Emotion-CI" \
-            -P num_epochs=$NUM_EPOCHS \
-            -P ci_mode=true \
-            -P ci_sample_size=300
+            --experiment-name "Indonesian-Emotion-Classification" \
+            -P preprocessing_dir=twitter_emotion_preprocessing \
+            -P random_seed=42
         env:
           MLFLOW_TRACKING_URI: "file:./mlruns"
 
-      # ── 7. Get latest MLflow run_id ───────────────────────────────────────────
+      # 7. Get latest MLflow run_id─
       - name: Get latest MLflow run_id
         run: |
           RUN_ID=$(cat MLProject/latest_run_id.txt 2>/dev/null || echo "NOT_FOUND")
           echo "LATEST_RUN_ID=$RUN_ID" >> $GITHUB_ENV
           echo "Latest MLflow Run ID: $RUN_ID"
 
-      # ── 8. Install Python dependencies ───────────────────────────────────────
+      # 8. Install Python dependencies
       - name: Install Python dependencies
         run: pip install requests
 
-      # ── 9. Upload to GitHub ───────────────────────────────────────────────────
+      # 9. Upload artifacts to GitHub─
       - name: Upload to GitHub
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           mkdir -p saved_artifacts
 
-          # Hanya copy file RINGAN — skip checkpoint (model.safetensors, optimizer.pt)
           cp MLProject/latest_run_id.txt saved_artifacts/ 2>/dev/null || true
-          cp MLProject/results_ci/confusion_matrix.png saved_artifacts/ 2>/dev/null || true
-          cp MLProject/results_ci/classification_report.json saved_artifacts/ 2>/dev/null || true
-          cp -r MLProject/results_ci/model_config saved_artifacts/ 2>/dev/null || true
+          cp -r MLProject/artifacts_modelling saved_artifacts/ 2>/dev/null || true
+          cp -r MLProject/mlruns saved_artifacts/ 2>/dev/null || true
 
-          git add saved_artifacts/
+          git add -f saved_artifacts/
           git diff --staged --quiet && echo "No changes." || (
             git commit -m "ci: save artifacts [run=${{ env.LATEST_RUN_ID }}] [$(date +'%Y-%m-%d %H:%M')]"
             git push
@@ -109,47 +97,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 10. Build Docker Model ────────────────────────────────────────────────
+      # 10. Build Docker Model─
       - name: Build Docker Model
         run: |
-          echo "Building Docker image dengan mlflow models build-docker..."
+          echo "Building Docker image..."
           mlflow models build-docker \
             --model-uri "runs:/${{ env.LATEST_RUN_ID }}/model" \
-            --name "indobert-emotion" \
+            --name "emotion-rf" \
             --env-manager local
         env:
           MLFLOW_TRACKING_URI: "file://${{ github.workspace }}/MLProject/mlruns"
 
-      # ── 11. Log in to Docker Hub ──────────────────────────────────────────────
+      # 11. Log in to Docker Hub─
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ── 12. Tag Docker Image ──────────────────────────────────────────────────
+      # 12. Tag Docker Image─
       - name: Tag Docker Image
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          docker tag indobert-emotion \
-            ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:latest || true
-          docker tag indobert-emotion \
-            ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:$SHORT_SHA || true
+          docker tag emotion-rf \
+            ${{ secrets.DOCKERHUB_USERNAME }}/emotion-rf:latest
+          docker tag emotion-rf \
+            ${{ secrets.DOCKERHUB_USERNAME }}/emotion-rf:$SHORT_SHA
           echo "DOCKER_TAG=$SHORT_SHA" >> $GITHUB_ENV
 
-      # ── 13. Push Docker Image ─────────────────────────────────────────────────
+      # 13. Push Docker Image
       - name: Push Docker Image
         run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:latest || true
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:${{ env.DOCKER_TAG }} || true
-          echo "✅ Docker image pushed!"
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/emotion-rf:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/emotion-rf:${{ env.DOCKER_TAG }}
+          echo "Docker image pushed!"
 
-      # ── Complete job ──────────────────────────────────────────────────────────
+      # Complete jo
       - name: Complete job
         if: always()
         run: |
           echo "================================================"
           echo "STATUS   : ${{ job.status }}"
           echo "RUN ID   : ${{ env.LATEST_RUN_ID }}"
-          echo "DOCKER   : ${{ secrets.DOCKERHUB_USERNAME }}/indobert-emotion:latest"
+          echo "DOCKER   : ${{ secrets.DOCKERHUB_USERNAME }}/emotion-rf:latest"
           echo "================================================"

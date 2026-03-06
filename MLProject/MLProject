@@ -8,47 +8,11 @@ entry_points:
       preprocessing_dir:
         type: str
         default: "twitter_emotion_preprocessing"
-      model_name:
-        type: str
-        default: "indobenchmark/indobert-base-p1"
-      max_length:
-        type: int
-        default: 128
-      batch_size:
-        type: int
-        default: 16
-      num_epochs:
-        type: int
-        default: 3
-      learning_rate:
-        type: float
-        default: 2e-5
-      weight_decay:
-        type: float
-        default: 0.05
-      warmup_ratio:
-        type: float
-        default: 0.1
       random_seed:
         type: int
         default: 42
-      ci_mode:
-        type: str
-        default: "false"
-      ci_sample_size:
-        type: int
-        default: 500
 
     command: >
       PREPROCESSING_DIR={preprocessing_dir}
-      MODEL_NAME={model_name}
-      MAX_LENGTH={max_length}
-      BATCH_SIZE={batch_size}
-      NUM_EPOCHS={num_epochs}
-      LEARNING_RATE={learning_rate}
-      WEIGHT_DECAY={weight_decay}
-      WARMUP_RATIO={warmup_ratio}
       RANDOM_SEED={random_seed}
-      CI_MODE={ci_mode}
-      CI_SAMPLE_SIZE={ci_sample_size}
       python modelling.py
